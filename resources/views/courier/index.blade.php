@@ -86,6 +86,45 @@
                 <tfoot><tr><th>Total</th><th class="n" id="tipos-total"></th></tr></tfoot>
             </table>
             <p id="tipos-control"></p>
+            <p><button type="button" id="boton-comunas">Ver Variables por comuna</button></p>
+        </section>
+
+        {{-- Variables por comuna --}}
+        <section class="caja oculto" id="etapa3">
+            <h2>Variables por comuna de destino</h2>
+            <p class="sub">Se juntan las formas que solo difieren en mayúsculas, tildes, espacios o símbolos. Los errores de tipeo siguen apareciendo aparte.</p>
+            <div class="cifras">
+                <div class="cifra"><span>Comunas distintas</span><strong id="comunas-cantidad"></strong></div>
+                <div class="cifra"><span>Bultos de Variables</span><strong id="comunas-bultos"></strong></div>
+            </div>
+            <table>
+                <thead><tr><th>Comuna de destino</th><th class="n">Bultos</th><th>Cómo viene escrita en Geolize</th></tr></thead>
+                <tbody id="comunas"></tbody>
+            </table>
+            <p><button type="button" id="boton-operadores">Ver a quién se le paga</button></p>
+        </section>
+
+        {{-- Variables por operador --}}
+        <section class="caja oculto" id="etapa4">
+            <h2>Etapa 3 · A quién se le paga (Variables)</h2>
+            <p class="sub">Cada comuna se buscó en la cobertura. En 4N RM y 4N Temuco todavía falta separar por repartidor.</p>
+            <div class="cifras">
+                <div class="cifra"><span>Con operador</span><strong id="op-con" class="ok"></strong></div>
+                <div class="cifra"><span>Sin cobertura</span><strong id="op-sin"></strong></div>
+                <div class="cifra"><span>Total Variables</span><strong id="op-total"></strong></div>
+            </div>
+            <table>
+                <thead><tr><th>Operador</th><th>Proveedor (razón social)</th><th class="n">Comunas</th><th class="n">Bultos</th></tr></thead>
+                <tbody id="operadores"></tbody>
+            </table>
+            <div id="sin-cobertura-caja" class="oculto">
+                <h2 style="margin-top:20px">Sin cobertura</h2>
+                <p class="sub">Comunas que no están en la tabla de coberturas. No se les asigna proveedor.</p>
+                <table>
+                    <thead><tr><th>Comuna de destino</th><th class="n">Bultos</th></tr></thead>
+                    <tbody id="sin-cobertura"></tbody>
+                </table>
+            </div>
         </section>
 
         <script>
@@ -140,12 +179,65 @@
                     ? '✔ La suma de los tipos coincide con los bultos que pasaron.'
                     : '✘ La suma de los tipos NO coincide con los bultos que pasaron.';
                 $('tipos-control').className = sumaTipos === r.pasan ? 'ok' : 'error';
+
+                const comunas = r.variablesPorComuna ?? [];
+                $('comunas-cantidad').textContent = numero(comunas.length);
+                $('comunas-bultos').textContent = numero(comunas.reduce((a, c) => a + c.bultos, 0));
+                $('comunas').replaceChildren();
+                for (const c of comunas) {
+                    const fila = $('comunas').insertRow();
+                    fila.insertCell().textContent = c.comuna;
+                    const celda = fila.insertCell();
+                    celda.className = 'n';
+                    celda.textContent = numero(c.bultos);
+                    // Solo si se juntaron varias formas de escribirla, se muestran con su cantidad.
+                    fila.insertCell().textContent = (c.variantes ?? []).length > 1
+                        ? c.variantes.map((v) => `${v.nombre} (${numero(v.bultos)})`).join(' · ')
+                        : '';
+                }
+
+                const porOperador = r.variablesPorOperador ?? { operadores: [], sinCobertura: [] };
+                const conOperador = porOperador.operadores.reduce((a, o) => a + o.bultos, 0);
+                const sinOperador = porOperador.sinCobertura.reduce((a, c) => a + c.bultos, 0);
+                $('op-con').textContent = numero(conOperador);
+                $('op-sin').textContent = numero(sinOperador);
+                $('op-total').textContent = numero(conOperador + sinOperador);
+                $('operadores').replaceChildren();
+                for (const o of porOperador.operadores) {
+                    const fila = $('operadores').insertRow();
+                    fila.insertCell().textContent = o.operador;
+                    fila.insertCell().textContent = o.proveedor ?? '';
+                    for (const valor of [o.comunas, o.bultos]) {
+                        const celda = fila.insertCell();
+                        celda.className = 'n';
+                        celda.textContent = numero(valor);
+                    }
+                }
+                $('sin-cobertura').replaceChildren();
+                for (const c of porOperador.sinCobertura) {
+                    const fila = $('sin-cobertura').insertRow();
+                    fila.insertCell().textContent = c.comuna;
+                    const celda = fila.insertCell();
+                    celda.className = 'n';
+                    celda.textContent = numero(c.bultos);
+                }
+                $('sin-cobertura-caja').classList.toggle('oculto', porOperador.sinCobertura.length === 0);
                 return true;
             }
 
             $('boton-clasificar').addEventListener('click', () => {
                 $('etapa2').classList.remove('oculto');
                 $('boton-clasificar').disabled = true;
+            });
+
+            $('boton-comunas').addEventListener('click', () => {
+                $('etapa3').classList.remove('oculto');
+                $('boton-comunas').disabled = true;
+            });
+
+            $('boton-operadores').addEventListener('click', () => {
+                $('etapa4').classList.remove('oculto');
+                $('boton-operadores').disabled = true;
             });
 
             // Pregunta cada 2 segundos cómo va, hasta que termine o falle.

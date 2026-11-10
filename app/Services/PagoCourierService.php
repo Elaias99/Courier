@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Imports\GeolizeImport;
+use App\Models\Coberturas;
+use Illuminate\Support\Str;
 
 /**
  * Reglas del pago a Courier.
@@ -11,7 +13,9 @@ use App\Imports\GeolizeImport;
  *          cuyo estado se paga.
  * Etapa 2: ponerle a cada bulto que pasó su tipo de pago
  *          (Lanas, Peumo, Retornos o Variables).
- * Las siguientes etapas (proveedor, precio, suma) se irán agregando aquí, una a la vez.
+ * Etapa 3: (por ahora solo Variables) buscar su comuna en la cobertura
+ *          para saber qué operador la atiende y a qué proveedor se le paga.
+ * Las siguientes etapas (repartidor de 4N, precio, suma) se irán agregando aquí, una a la vez.
  */
 class PagoCourierService
 {
@@ -52,7 +56,36 @@ class PagoCourierService
 
         $resultado['pasan'] = $this->clasificar($resultado['pasan']);
 
+        $resultado['pasan'] = $this->asignarOperador($resultado['pasan'], 'Variables');
+
         return $resultado;
+    }
+
+    /**
+     * Piso 3: a los bultos de un tipo les agrega quién atiende su comuna.
+     *
+     * Busca la comuna en la tabla coberturas comparando sin mayúsculas, tildes ni símbolos.
+     * Si la comuna no está, el bulto queda con operador null ("sin cobertura"):
+     * no se le inventa un proveedor ni se descarta en silencio.
+     */
+    public function asignarOperador(array $bultos, string $tipo): array
+    {
+        // Comuna normalizada => cobertura (con su proveedor), cargadas una sola vez.
+        $coberturas = Coberturas::with('proveedor')->get()
+            ->keyBy(fn (Coberturas $cobertura) => $this->normalizarComuna($cobertura->comuna));
+
+        foreach ($bultos as $i => $bulto) {
+            if ($bulto['tipo'] !== $tipo) {
+                continue;
+            }
+
+            $cobertura = $coberturas->get($this->normalizarComuna($bulto['comuna']));
+
+            $bultos[$i]['operador'] = $cobertura?->operador;
+            $bultos[$i]['proveedor'] = $cobertura?->proveedor?->razon_social;
+        }
+
+        return $bultos;
     }
 
     /** Piso 1: el Import lee el Excel y devuelve todos los bultos. */
@@ -77,7 +110,115 @@ class PagoCourierService
             'pasanPorEstado' => array_count_values(array_column($pasan, 'estado')),
             'descartadosPorEstado' => array_count_values(array_column($descartados, 'estado')),
             'porTipo' => array_count_values(array_column($pasan, 'tipo')),
+            'variablesPorComuna' => $this->contarPorComuna($pasan, 'Variables'),
+            'variablesPorOperador' => $this->contarPorOperador($pasan, 'Variables'),
         ];
+    }
+
+    /**
+     * Cuenta cuántos bultos de un tipo tiene cada operador.
+     * Los que no encontraron su comuna se juntan en "sin cobertura", con el detalle de sus comunas.
+     *
+     * Devuelve: ['operadores' => [['operador', 'proveedor', 'bultos', 'comunas'], ...],
+     *            'sinCobertura' => [['comuna', 'bultos'], ...]]
+     */
+    public function contarPorOperador(array $bultos, string $tipo): array
+    {
+        $operadores = [];
+        $sinCobertura = [];
+
+        foreach ($bultos as $bulto) {
+            if ($bulto['tipo'] !== $tipo) {
+                continue;
+            }
+
+            if ($bulto['operador'] === null) {
+                $comuna = $bulto['comuna'] !== '' ? $bulto['comuna'] : '(sin comuna)';
+                $sinCobertura[$comuna] = ($sinCobertura[$comuna] ?? 0) + 1;
+
+                continue;
+            }
+
+            $operador = $bulto['operador'];
+            $operadores[$operador] ??= ['operador' => $operador, 'proveedor' => $bulto['proveedor'], 'bultos' => 0, 'comunas' => []];
+            $operadores[$operador]['bultos']++;
+            $operadores[$operador]['comunas'][$this->normalizarComuna($bulto['comuna'])] = true;
+        }
+
+        $operadores = array_values(array_map(function ($fila) {
+            $fila['comunas'] = count($fila['comunas']);
+
+            return $fila;
+        }, $operadores));
+        usort($operadores, fn ($a, $b) => $b['bultos'] <=> $a['bultos']);
+
+        arsort($sinCobertura);
+        $sinCobertura = array_map(
+            fn ($comuna, $cantidad) => ['comuna' => (string) $comuna, 'bultos' => $cantidad],
+            array_keys($sinCobertura),
+            $sinCobertura,
+        );
+
+        return ['operadores' => $operadores, 'sinCobertura' => $sinCobertura];
+    }
+
+    /**
+     * Cuenta cuántos bultos de un tipo hay en cada comuna de destino.
+     *
+     * Las formas de escribir que solo difieren en mayúsculas, tildes, espacios o
+     * símbolos se juntan en una sola comuna ("PUERTO NATALES" y "Puerto Natales").
+     * Los errores de tipeo ("Cerillos") NO se juntan: siguen apareciendo aparte.
+     *
+     * Devuelve una lista ordenada de mayor a menor:
+     * [['comuna' => 'Puerto Natales', 'bultos' => 44, 'variantes' => [['nombre' => 'PUERTO NATALES', 'bultos' => 28], ...]], ...]
+     */
+    public function contarPorComuna(array $bultos, string $tipo): array
+    {
+        $grupos = []; // clave normalizada => [forma escrita => cantidad]
+
+        foreach ($bultos as $bulto) {
+            if ($bulto['tipo'] !== $tipo) {
+                continue;
+            }
+
+            $escrita = $bulto['comuna'] !== '' ? $bulto['comuna'] : '(sin comuna)';
+            $clave = $this->normalizarComuna($escrita);
+
+            $grupos[$clave][$escrita] = ($grupos[$clave][$escrita] ?? 0) + 1;
+        }
+
+        $lista = [];
+        foreach ($grupos as $formas) {
+            arsort($formas);
+
+            $variantes = [];
+            foreach ($formas as $nombre => $cantidad) {
+                $variantes[] = ['nombre' => (string) $nombre, 'bultos' => $cantidad];
+            }
+
+            $lista[] = [
+                'comuna' => $variantes[0]['nombre'], // Se muestra la forma más usada.
+                'bultos' => array_sum($formas),
+                'variantes' => $variantes,
+            ];
+        }
+
+        usort($lista, fn ($a, $b) => $b['bultos'] <=> $a['bultos']);
+
+        return $lista;
+    }
+
+    /**
+     * Deja el nombre de una comuna en una forma única para poder compararlo:
+     * sin tildes, en minúsculas y sin espacios ni símbolos.
+     *
+     * "Concón", "CON CON" y "_Con Con" quedan todas como "concon".
+     */
+    public function normalizarComuna(string $comuna): string
+    {
+        $sinTildes = Str::ascii($comuna);
+
+        return preg_replace('/[^a-z0-9]/', '', strtolower($sinTildes));
     }
 
     /** Filtro de entrada: separa los bultos que pasan de los descartados. */

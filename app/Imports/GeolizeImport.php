@@ -27,6 +27,7 @@ class GeolizeImport
         'Comerciante' => 'comerciante',
         'Servicio' => 'servicio',
         'Nombre del destinatario' => 'destinatario',
+        'Comuna de destino' => 'comuna',
     ];
 
     /** Cada cuántas filas se avisa el avance. */
